@@ -1,0 +1,38 @@
+package Heroes
+import Assets
+import UnitObjEditing
+
+class Shoveler extends HeroDefinition
+    construct(int id)
+        super(id, 'Hpal')
+        setModelFile(Units.koboldGeomancer1)
+        setAttacksEnabled(0)
+        setIconGameInterface(Icons.bTNShoveler)
+        setHeroAbilities("")
+        setHitPointsMaximumBase(400)
+        setCanFlee(false)
+        setScalingValue(0.75)
+
+class Temp extends Shoveler
+    construct(int id)
+        super(id)
+        setModelFile(Units.kobold1)
+        setIconGameInterface(Icons.bTNTemp)
+
+// Abilities
+class Sprint extends Shoveler
+    construct(int id)
+        super(id)
+        setModelFile("none.mdl")
+        setIconGameInterface(Icons.bTNRegeneration)
+        setHitPointsMaximumBase(16)
+        setHitPointsRegenerationRate(1.)
+        setHitPointsRegenerationType("always")
+        setShadowImageWidth(0.)
+        setShadowImageHeight(0.)
+        setHideMinimapDisplay(true)
+
+@compiletime function gen()
+    new Shoveler('Shvl')
+    new Temp('Temp')
+    new Sprint('Spnt')

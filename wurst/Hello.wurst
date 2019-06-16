@@ -1,0 +1,312 @@
+package Hello
+import Assets
+import ClosureEvents
+import ClosureTimers
+import Execute
+import GameTimer
+import HashMap
+import HashSet
+import Knockback3
+import LinkedList
+import SoundUtils
+import TerrainUtils
+
+function real.toRad() returns real
+	return this * bj_PI / 180.
+
+constant CHARGE_DURATION = 4.
+
+constant messages = asList(
+	"|cffffcc00Esc|r for help",
+	"|cffffcc00WASD|r to move",
+	"|cffffcc00Attacking|r is automatic",
+	"|cffffcc00F2/J|r is Charge!",
+	"|cffffcc00alt+q|r to quit"
+)
+
+constant FRAMERATE = ANIMATION_PERIOD / 4.
+constant MOVESPEED = 400. * FRAMERATE
+constant TURNRATE = FRAMERATE * bj_PI * 6.  // Radians per second?
+
+function effect.destr(real after)
+	doAfter(after) ->
+		this.destr()
+
+enum Animation
+	NONE
+	RUN
+	STAND
+	ATTACK
+
+constant animMap = new HashMap<int, HashMap<Animation, int>>()
+
+function unit.setXYChecked(vec2 where)
+	if where.isTerrainWalkable()
+		this.setXY(where)
+
+constant animations = new HashMap<unit, int>()
+function unit.changeAnimation(Animation which)
+	let anim = animMap.get(this.getTypeId()).get(which)
+
+	if not animations.has(this)
+		animations.put(this, anim)
+		this.setAnimation(anim)
+	else if animations.get(this) != anim
+		animations.put(this, anim)
+		this.setAnimation(anim)
+
+function unit.deadOrGone() returns bool
+	return this == null or not this.isAlive()
+
+class KeyData
+	bool w
+	bool a
+	bool s
+	bool d
+
+	bool f2
+
+	construct()
+		this.w  = false
+		this.a  = false
+		this.s  = false
+		this.d  = false
+		this.f2 = false
+
+constant keyData = new HashMap<player, KeyData>()
+
+constant hitSound = new SoundDefinition(Sounds.metalMediumBashFlesh1, false, true)
+constant deathSound = new SoundDefinition(Sounds.sheepDeath, false, true)
+constant chargeCastSound = new SoundDefinition(Sounds.defendCaster1, false)
+constant chargeHitSound = new SoundDefinition(Sounds.splat1, false)
+
+constant charging = new HashMap<player, real>()
+
+constant grp = CreateGroup()
+unit array heroes
+unit array sprints
+init
+	animMap.put('Shvl', new HashMap<Animation, int>())
+	animMap.put('Temp', new HashMap<Animation, int>())
+	animMap.get('Shvl').put(Animation.ATTACK, 4)
+	animMap.get('Shvl').put(Animation.RUN,    1)
+	animMap.get('Shvl').put(Animation.STAND,  0)
+	animMap.get('Temp').put(Animation.ATTACK, 4)
+	animMap.get('Temp').put(Animation.RUN,    1)
+	animMap.get('Temp').put(Animation.STAND,  0)
+
+	// hideOriginFrames(true)
+	EnableUserUI(false)
+	EnableDragSelect(false, false)
+	EnablePreSelect(false, false)
+	EnableSelect(false, false)
+
+	var count = 0
+	for i = 0 to 5
+		if players[i].isIngame()
+			count++
+			heroes[i] = createUnit(players[i], i < 3 ? 'Shvl' : 'Temp', players[i].getStartLocation(), angle(0.))
+			sprints[i] = createUnit(players[i], 'Spnt', players[i].getStartLocation(), angle(0.))
+	if count < 2
+		// Single player mode.
+		let z = players[0].isIngame() ? 3 : 0
+		heroes[z] = createUnit(players[z], z < 3 ? 'Shvl' : 'Temp', players[z].getStartLocation(), angle(0.))
+
+	FogEnable(false)
+	FogMaskEnable(false)
+	Player(PLAYER_NEUTRAL_AGGRESSIVE).setState(PLAYER_STATE_NO_CREEP_SLEEP, 1)
+
+	let keyTrig = CreateTrigger()
+		..addAction() ->
+		let p = GetTriggerPlayer()
+		if not keyData.has(p)
+			keyData.put(p, new KeyData())
+
+		let key = BlzGetTriggerPlayerKey()
+		if key == OSKEY_A
+			keyData.get(p).a = true
+		else if key == OSKEY_S
+			keyData.get(p).s = true
+		else if key == OSKEY_D
+			keyData.get(p).d = true
+		else if key == OSKEY_W
+			keyData.get(p).w = true
+		else if key == OSKEY_F2 or key == OSKEY_J
+			keyData.get(p).f2 = true
+		else
+			skip
+
+	let unkeyTrig = CreateTrigger()
+		..addAction() ->
+		let p = GetTriggerPlayer()
+		if not keyData.has(p)
+			keyData.put(p, new KeyData())
+
+		let key = BlzGetTriggerPlayerKey()
+		if key == OSKEY_A
+			keyData.get(p).a = false
+		else if key == OSKEY_S
+			keyData.get(p).s = false
+		else if key == OSKEY_D
+			keyData.get(p).d = false
+		else if key == OSKEY_W
+			keyData.get(p).w = false
+		else if key == OSKEY_F2 or key == OSKEY_J
+			skip  // F keys don't register on-off.
+		else
+			skip
+
+	oskeytype array keys = [
+		OSKEY_A, OSKEY_D, OSKEY_S, OSKEY_W, OSKEY_F2, OSKEY_J
+	]
+
+	for i = 0 to 5
+		for j = 0 to 5
+			keyTrig.registerPlayerKeyPress(
+				players[i],
+				keys[j],
+				OSKEY_META.NONE,
+				true
+			)
+			unkeyTrig.registerPlayerKeyPress(
+				players[i],
+				keys[j],
+				OSKEY_META.NONE,
+				false
+			)
+
+	EventListener.add(EVENT_PLAYER_END_CINEMATIC) ->
+		printTimedToPlayerClear("Help...\n-   " + messages.joinBy("\n-   "), 15., GetTriggerPlayer())
+
+	doAfter(5.) ->
+		print(messages.get(0))
+
+	// Death + Win/Lose
+	EventListener.add(EVENT_PLAYER_UNIT_DEATH) ->
+		deathSound.playOnPoint(GetDyingUnit().getPos3Real(), 1000)
+		if heroes[0].deadOrGone() and heroes[1].deadOrGone() and heroes[2].deadOrGone()
+			// Temps victory.
+			print("Team |cffffcc00Temps|r was victorious! \\m/")
+			doAfter(5.) ->
+				CustomVictoryBJ(players[3], false, true)
+				CustomVictoryBJ(players[4], false, true)
+				CustomVictoryBJ(players[5], false, true)
+				CustomDefeatBJ(players[0], "rekt")
+				CustomDefeatBJ(players[1], "rekt")
+				CustomDefeatBJ(players[2], "rekt")
+		else if heroes[3].deadOrGone() and heroes[4].deadOrGone() and heroes[5].deadOrGone()
+			// Shovelers victory.
+			print("Team |cffffcc00Shovelers|r was victorious! \\m/")
+			doAfter(5.) ->
+				CustomVictoryBJ(players[0], false, true)
+				CustomVictoryBJ(players[1], false, true)
+				CustomVictoryBJ(players[2], false, true)
+				CustomDefeatBJ(players[3], "shrekt")
+				CustomDefeatBJ(players[4], "shrekt")
+				CustomDefeatBJ(players[5], "shrekt")
+
+	for i = 0 to 5
+		if heroes[i] != null
+			execute() ->
+				let hitSet = new HashSet<unit>()
+
+				doPeriodicallyCounted(ANIMATION_PERIOD / 2., 100000) (cb) ->
+					if localPlayer == players[i]
+						if heroes[i].isAlive()
+							SetCameraField(CAMERA_FIELD_ROTATION, heroes[i].getFacing(), ANIMATION_PERIOD)
+							SetCameraField(CAMERA_FIELD_ANGLE_OF_ATTACK, 330., ANIMATION_PERIOD)
+							SetCameraField(CAMERA_FIELD_TARGET_DISTANCE, 850., ANIMATION_PERIOD)
+							PanCameraToTimed(heroes[i].getX() + 200. * heroes[i].getFacing().toRad().cos(), heroes[i].getY() + 200. * heroes[i].getFacing().toRad().sin(), ANIMATION_PERIOD)
+						else
+							ResetToGameCamera(0.)
+					let perc = heroes[i].getHP() / heroes[i].getMaxHP()
+
+					if perc < 0.66 and cb.getCount() % 66 == 0
+						heroes[i].addEffect(Objects.humanBloodPeasant, "origin").destr(1.)
+					if perc < 0.33 and cb.getCount() % 33 == 0
+						heroes[i].addEffect(Objects.humanBloodFootman, "chest").destr(1.)
+					if perc < 0.15 and cb.getCount() % 11 == 0
+						addEffect(Objects.humanBloodKnight, heroes[i].getPos()).destr()
+
+					if keyData.has(players[i])
+						if hitSet.isEmpty()
+							grp.enumUnitsInRange(heroes[i].getPos().polarOffset(heroes[i].getFacingAngle(), 64.), 64.)
+							for p from grp
+								if heroes[i].isEnemyOf(p.getOwner()) and p.isAlive()
+									hitSet.add(p)
+
+							if not hitSet.isEmpty()
+								doAfter(.6) ->
+									hitSet.clear()
+									grp.enumUnitsInRange(heroes[i].getPos().polarOffset(heroes[i].getFacingAngle(), 64.), 96.)
+									for p from grp
+										if heroes[i].isEnemyOf(p.getOwner()) and p.isAlive()
+											hitSet.add(p)
+
+									for d from hitSet.iterator()
+										heroes[i].damageTarget(d, 50.)
+										hitSound.playOnPoint(d.getPos3Real(), 1000)
+										d.addEffect(Objects.beastmasterBlood, "origin").destr()
+										heroes[i].changeAnimation(Animation.STAND)  // Reset the animation.
+									hitSet.clear()
+
+						// Movement.
+						if heroes[i].isAlive()
+							if keyData.get(players[i]).w
+								let charge = charging.has(players[i]) and charging.get(players[i]) + CHARGE_DURATION > getElapsedGameTime()
+
+								if hitSet.isEmpty()
+									heroes[i].changeAnimation(Animation.RUN)
+									heroes[i].setTimeScale(charge ? 3.5 : 1.5)
+								else
+									heroes[i].changeAnimation(Animation.ATTACK)
+
+								heroes[i].setXYChecked(
+									heroes[i].getPos().polarOffset(
+										heroes[i].getFacingAngle(),
+										MOVESPEED + (charge ? 400. * FRAMERATE : 0.)
+									)
+								)
+
+								if charge
+									grp.enumUnitsInRange(heroes[i].getPos().polarOffset(heroes[i].getFacingAngle(), 64.), 64.)
+									for p from grp
+										if heroes[i].isEnemyOf(p.getOwner()) and p.isAlive()
+											heroes[i].damageTarget(p, 100.)
+											Knockback3.add(p, 800., heroes[i].getPos().angleTo(p.getPos()), angle(bj_PI / 4.))
+											charging.put(players[i], 0.)
+											chargeHitSound.playOnPoint(heroes[i].getPos3Real(), 2000)
+
+							else if keyData.get(players[i]).s
+								if hitSet.isEmpty()
+									heroes[i].changeAnimation(Animation.RUN)
+									heroes[i].setTimeScale(-1.)
+								else
+									heroes[i].changeAnimation(Animation.ATTACK)
+								heroes[i].setXYChecked(heroes[i].getPos().polarOffset(heroes[i].getFacingAngle(), -0.75 * MOVESPEED))
+							else
+								if hitSet.isEmpty()
+									heroes[i].changeAnimation(Animation.STAND)
+								else
+									heroes[i].changeAnimation(Animation.ATTACK)
+
+							if keyData.get(players[i]).f2
+								keyData.get(players[i]).f2 = false
+								if sprints[i].getHP() == sprints[i].getMaxHP()
+									chargeCastSound.playOnPoint(heroes[i].getPos3Real(), 1500)
+									charging.put(players[i], getElapsedGameTime())
+									sprints[i].setHP(0.5)
+
+							if keyData.get(players[i]).a
+								SetUnitFacingTimed(
+									heroes[i],
+									(heroes[i].getFacingAngle() + angle(TURNRATE)).degrees(),
+									FRAMERATE
+								)
+
+							if keyData.get(players[i]).d
+								SetUnitFacingTimed(
+									heroes[i],
+									(heroes[i].getFacingAngle() - angle(TURNRATE)).degrees(),
+									FRAMERATE
+								)
